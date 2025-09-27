@@ -1,9 +1,8 @@
 const { pool } = require('../config/database');
 const { validationResult } = require('express-validator');
 const SSLCommerzPayment = require('sslcommerz-lts');
-const { v4: uuidv4 } = require('uuid');
 
-// Initialize SSL Commerz (will be false for sandbox)
+// Initialize SSL Commerz
 const sslcz = new SSLCommerzPayment(
     process.env.SSLCOMMERZ_STORE_ID || 'testbox',
     process.env.SSLCOMMERZ_STORE_PASSWORD || 'qwerty',
@@ -31,7 +30,7 @@ const getPaymentMethods = async (req, res) => {
     }
 };
 
-// Initiate payment for course enrollment
+// Initiate payment for course enrollment (FIXED VERSION)
 const initiatePayment = async (req, res) => {
     const connection = await pool.getConnection();
     
@@ -52,20 +51,6 @@ const initiatePayment = async (req, res) => {
         const { courseId, paymentMethod = 'sslcommerz' } = req.body;
 
         console.log(`💳 Payment initiation - User: ${userId}, Course: ${courseId}, Method: ${paymentMethod}`);
-
-        // Validate payment method
-        const [paymentMethods] = await connection.execute(
-            'SELECT name FROM payment_methods WHERE name = ? AND is_active = TRUE',
-            [paymentMethod]
-        );
-
-        if (!paymentMethods.length) {
-            await connection.rollback();
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid or inactive payment method'
-            });
-        }
 
         // Get course details
         const [courses] = await connection.execute(`
@@ -107,10 +92,30 @@ const initiatePayment = async (req, res) => {
             }
         }
 
-        // Calculate payment amount
+        // Calculate payment amount (FIXED - ensure proper numeric conversion)
         const originalPrice = parseFloat(course.price);
-        const finalPrice = course.discount_price ? parseFloat(course.discount_price) : originalPrice;
-        const discountAmount = originalPrice - finalPrice;
+        const discountPrice = course.discount_price ? parseFloat(course.discount_price) : null;
+        const finalPrice = discountPrice || originalPrice;
+        
+        // Ensure amount is numeric and properly formatted
+        const numericAmount = Number(finalPrice.toFixed(2));
+        
+        console.log('💰 Payment Amount Details:', {
+            originalPrice,
+            discountPrice,
+            finalPrice,
+            numericAmount,
+            type: typeof numericAmount
+        });
+
+        // Validate amount
+        if (isNaN(numericAmount) || numericAmount <= 0) {
+            await connection.rollback();
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid course price'
+            });
+        }
 
         // Generate unique transaction ID
         const transactionId = `TXN_${Date.now()}_${userId}_${courseId}_${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
@@ -134,18 +139,15 @@ const initiatePayment = async (req, res) => {
         // Create or update enrollment record
         const [enrollmentResult] = await connection.execute(`
             INSERT INTO enrollments (
-                user_id, course_id, payment_status, amount_paid, original_price, 
-                discount_applied, payment_method, transaction_id
-            ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
+                user_id, course_id, payment_status, amount_paid, payment_method, transaction_id
+            ) VALUES (?, ?, 'pending', ?, ?, ?)
             ON DUPLICATE KEY UPDATE 
                 payment_status = 'pending',
                 amount_paid = VALUES(amount_paid),
-                original_price = VALUES(original_price),
-                discount_applied = VALUES(discount_applied),
                 payment_method = VALUES(payment_method),
                 transaction_id = VALUES(transaction_id),
                 enrolled_at = CURRENT_TIMESTAMP
-        `, [userId, courseId, finalPrice, originalPrice, discountAmount, paymentMethod, transactionId]);
+        `, [userId, courseId, numericAmount, paymentMethod, transactionId]);
 
         // Get enrollment ID
         let enrollmentId;
@@ -160,9 +162,9 @@ const initiatePayment = async (req, res) => {
         }
 
         if (paymentMethod === 'sslcommerz') {
-            // SSL Commerz payment initialization
+            // SSL Commerz payment initialization (FIXED)
             const sslData = {
-                total_amount: finalPrice,
+                total_amount: numericAmount, // FIXED: Numeric value
                 currency: 'BDT',
                 tran_id: transactionId,
                 success_url: process.env.SSLCOMMERZ_SUCCESS_URL || `http://localhost:5000/api/payment/ssl/success`,
@@ -170,14 +172,14 @@ const initiatePayment = async (req, res) => {
                 cancel_url: process.env.SSLCOMMERZ_CANCEL_URL || `http://localhost:5000/api/payment/ssl/cancel`,
                 ipn_url: process.env.SSLCOMMERZ_IPN_URL || `http://localhost:5000/api/payment/ssl/ipn`,
                 
-                // Product details
+                // Product details (FIXED - ensure proper lengths)
                 shipping_method: 'NO',
-                product_name: course.title,
+                product_name: course.title.length > 100 ? course.title.substring(0, 100) : course.title,
                 product_category: 'Education',
                 product_profile: 'non-physical-goods',
                 
-                // Customer details
-                cus_name: user.name || 'Student',
+                // Customer details (FIXED - ensure all required fields)
+                cus_name: user.name ? user.name.substring(0, 50) : 'Student',
                 cus_email: user.email || `student${userId}@example.com`,
                 cus_add1: 'Dhaka',
                 cus_add2: 'Bangladesh',
@@ -188,8 +190,8 @@ const initiatePayment = async (req, res) => {
                 cus_phone: user.mobile,
                 cus_fax: user.mobile,
                 
-                // Shipping details
-                ship_name: user.name || 'Student',
+                // Shipping details (FIXED)
+                ship_name: user.name ? user.name.substring(0, 50) : 'Student',
                 ship_add1: 'Dhaka',
                 ship_add2: 'Bangladesh',
                 ship_city: 'Dhaka',
@@ -204,10 +206,11 @@ const initiatePayment = async (req, res) => {
             };
 
             try {
-                console.log('🔄 Initializing SSL Commerz with data:', {
-                    amount: sslData.total_amount,
+                console.log('🔄 SSL Commerz Data Being Sent:', {
+                    total_amount: sslData.total_amount,
+                    currency: sslData.currency,
                     tran_id: sslData.tran_id,
-                    customer: sslData.cus_name
+                    product_name: sslData.product_name
                 });
 
                 const sslResponse = await sslcz.init(sslData);
@@ -219,13 +222,11 @@ const initiatePayment = async (req, res) => {
                     await connection.execute(`
                         INSERT INTO payments (
                             user_id, course_id, enrollment_id, amount, payment_method,
-                            gateway_name, transaction_id, session_key, gateway_response,
-                            success_url, fail_url, cancel_url, status
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                            gateway_name, transaction_id, session_key, status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
                     `, [
-                        userId, courseId, enrollmentId, finalPrice, paymentMethod,
-                        'sslcommerz', transactionId, sslResponse.sessionkey || '',
-                        JSON.stringify(sslResponse), sslData.success_url, sslData.fail_url, sslData.cancel_url
+                        userId, courseId, enrollmentId, numericAmount, paymentMethod,
+                        'sslcommerz', transactionId, sslResponse.sessionkey || ''
                     ]);
 
                     // Update enrollment status
@@ -243,12 +244,12 @@ const initiatePayment = async (req, res) => {
                             payment_url: sslResponse.redirectGatewayURL || sslResponse.GatewayPageURL,
                             transaction_id: transactionId,
                             session_key: sslResponse.sessionkey,
-                            amount: finalPrice,
+                            amount: numericAmount,
                             course_title: course.title
                         }
                     });
                 } else {
-                    throw new Error(`SSL Commerz initialization failed: ${sslResponse.failedreason || 'Unknown error'}`);
+                    throw new Error(`SSL Commerz initialization failed: ${sslResponse.failedreason || JSON.stringify(sslResponse)}`);
                 }
             } catch (sslError) {
                 console.error('❌ SSL Commerz error:', sslError);
@@ -263,7 +264,12 @@ const initiatePayment = async (req, res) => {
                 res.status(500).json({
                     success: false,
                     message: 'Payment gateway initialization failed',
-                    error: sslError.message
+                    error: sslError.message,
+                    debug_info: process.env.NODE_ENV === 'development' ? {
+                        amount_sent: numericAmount,
+                        amount_type: typeof numericAmount,
+                        ssl_response: sslError.response?.data || 'No response data'
+                    } : undefined
                 });
             }
         } else {
@@ -279,14 +285,15 @@ const initiatePayment = async (req, res) => {
         console.error('❌ Initiate payment error:', error);
         res.status(500).json({
             success: false,
-            message: 'Payment initiation failed'
+            message: 'Payment initiation failed',
+            error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
         });
     } finally {
         connection.release();
     }
 };
 
-// SSL Commerz Success Callback
+// SSL Commerz Success Callback (FIXED)
 const sslSuccess = async (req, res) => {
     try {
         const data = req.method === 'POST' ? req.body : req.query;
@@ -295,17 +302,15 @@ const sslSuccess = async (req, res) => {
         console.log('✅ SSL Success callback received:', { tran_id, val_id, status, amount });
 
         if (status === 'VALID' || status === 'VALIDATED') {
-            // Update enrollment status
+            // Update enrollment status (FIXED - simplified)
             const [updateResult] = await pool.execute(`
                 UPDATE enrollments SET 
-                    payment_status = 'completed',
-                    gateway_transaction_id = ?,
-                    payment_completed_at = CURRENT_TIMESTAMP
+                    payment_status = 'completed'
                 WHERE transaction_id = ?
-            `, [val_id, tran_id]);
+            `, [tran_id]);
 
             if (updateResult.affectedRows > 0) {
-                // Update payment record
+                // Update payment record (keep gateway info here)
                 await pool.execute(
                     'UPDATE payments SET status = "completed", gateway_transaction_id = ?, completed_at = CURRENT_TIMESTAMP WHERE transaction_id = ?',
                     [val_id, tran_id]
@@ -313,10 +318,10 @@ const sslSuccess = async (req, res) => {
 
                 console.log('✅ Payment completed successfully for transaction:', tran_id);
                 
-                // Redirect to success page
                 const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
                 res.redirect(`${frontendUrl}/payment/success?transaction=${tran_id}`);
             } else {
+                console.log('❌ Enrollment not found for transaction:', tran_id);
                 res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/payment/error?message=enrollment_not_found`);
             }
         } else {
@@ -382,32 +387,16 @@ const sslCancel = async (req, res) => {
 const getUserEnrollments = async (req, res) => {
     try {
         const userId = req.user.id;
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 10;
-        const status = req.query.status;
 
-        const offset = (page - 1) * limit;
-
-        let query = `
+        const [enrollments] = await pool.execute(`
             SELECT e.id, e.payment_status, e.amount_paid, e.progress_percentage,
                    e.enrolled_at, e.payment_completed_at, e.transaction_id,
                    c.id as course_id, c.title, c.slug, c.price, c.discount_price
             FROM enrollments e
             JOIN courses c ON e.course_id = c.id
             WHERE e.user_id = ?
-        `;
-
-        let params = [userId];
-
-        if (status) {
-            query += ' AND e.payment_status = ?';
-            params.push(status);
-        }
-
-        query += ' ORDER BY e.enrolled_at DESC LIMIT ? OFFSET ?';
-        params.push(limit, offset);
-
-        const [enrollments] = await pool.execute(query, params);
+            ORDER BY e.enrolled_at DESC
+        `, [userId]);
 
         res.json({
             success: true,

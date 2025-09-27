@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path'); // <- Add this line
 require('dotenv').config();
 
 // Database import
@@ -21,11 +22,16 @@ const startServer = async () => {
     }
 };
 
-// Routes - Add all routes here
+// Serve uploaded files (FIXED - path now imported)
+app.use('/uploads', express.static(path.join(__dirname, 'src/uploads')));
+
+// Routes
 app.use('/api/auth', require('./src/routes/auth'));
 app.use('/api/profile', require('./src/routes/profile'));
 app.use('/api/courses', require('./src/routes/courses'));
 app.use('/api/payment', require('./src/routes/payment'));
+app.use('/api/upload', require('./src/routes/upload')); // <- Add this line
+
 // Test route
 app.get('/', (req, res) => {
     res.json({
@@ -35,7 +41,9 @@ app.get('/', (req, res) => {
         routes: {
             auth: '/api/auth',
             profile: '/api/profile', 
-            courses: '/api/courses'
+            courses: '/api/courses',
+            payment: '/api/payment',
+            upload: '/api/upload'  // <- Add this
         }
     });
 });
@@ -96,6 +104,16 @@ app.get('/api/routes', (req, res) => {
                 'PUT /api/courses/:id': 'Update course (Teacher only)',
                 'GET /api/courses/teacher/my-courses': 'Get teacher courses (Teacher only)',
                 'DELETE /api/courses/:id': 'Delete course (Teacher only)'
+            },
+            payment: {
+                'GET /api/payment/methods': 'Get payment methods (Protected)',
+                'POST /api/payment/initiate': 'Initiate payment (Protected)',
+                'GET /api/payment/my-enrollments': 'Get user enrollments (Protected)',
+                'GET /api/payment/enrollment-status/:courseId': 'Check enrollment status (Protected)'
+            },
+            upload: {
+                'POST /api/upload/test': 'Test file upload (Protected)',
+                'POST /api/upload/course-thumbnail': 'Upload course thumbnail (Teacher only)'
             }
         }
     });
@@ -146,6 +164,16 @@ app.listen(PORT, () => {
    PUT    /api/courses/:id (Teacher)
    GET    /api/courses/teacher/my-courses (Teacher)
    DELETE /api/courses/:id (Teacher)
+
+💳 Payment Routes:
+   GET    /api/payment/methods (Protected)
+   POST   /api/payment/initiate (Protected)
+   GET    /api/payment/my-enrollments (Protected)
+   GET    /api/payment/enrollment-status/:courseId (Protected)
+
+📁 Upload Routes:
+   POST   /api/upload/test (Protected)
+   POST   /api/upload/course-thumbnail (Teacher)
     `);
     
     startServer();
